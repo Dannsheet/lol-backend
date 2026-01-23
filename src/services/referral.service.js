@@ -359,7 +359,7 @@ export async function getMyReferralStats(userId) {
   const { data: activeSubsRaw, error: subsErr } = uniqueTeamIds.length
     ? await supabaseAdmin
         .from('subscriptions')
-        .select('user_id, plan_id, created_at, expires_at, is_active, planes(precio, price, monto)')
+        .select('user_id, plan_id, created_at, expires_at, is_active, planes(precio)')
         .in('user_id', uniqueTeamIds)
         .eq('is_active', true)
         .gt('expires_at', nowIso)
@@ -371,7 +371,9 @@ export async function getMyReferralStats(userId) {
   for (const row of activeSubsRaw || []) {
     const uid = row?.user_id;
     if (!uid) continue;
-    if (!activeByUser.has(uid)) activeByUser.set(uid, row);
+    const arr = activeByUser.get(uid) || [];
+    arr.push(row);
+    activeByUser.set(uid, arr);
   }
 
   const { data: commissionsAll, error: commAllErr } = await supabaseAdmin
@@ -404,14 +406,16 @@ export async function getMyReferralStats(userId) {
     let activos = 0;
     let agregadoHoy = 0;
     for (const id of ids) {
-      const sub = activeByUser.get(id);
-      if (!sub) continue;
+      const subs = activeByUser.get(id);
+      if (!subs || !subs.length) continue;
       activos += 1;
-      const precio =
-        Number(sub?.planes?.precio ?? sub?.planes?.price ?? sub?.planes?.monto ?? 0) || 0;
-      total += precio;
-      const created = sub?.created_at ? new Date(String(sub.created_at)) : null;
-      if (created && created >= startOfDay && created < startOfNextDay) agregadoHoy += precio;
+      for (const sub of subs) {
+        const precio =
+          Number(sub?.planes?.precio ?? sub?.planes?.price ?? sub?.planes?.monto ?? 0) || 0;
+        total += precio;
+        const created = sub?.created_at ? new Date(String(sub.created_at)) : null;
+        if (created && created >= startOfDay && created < startOfNextDay) agregadoHoy += precio;
+      }
     }
     return { total, activos, agregadoHoy };
   };
@@ -442,6 +446,86 @@ export async function getMyReferralStats(userId) {
     recargaTotal,
     agregadoHoy,
     niveles: [l1, l2, l3],
+  };
+}
+
+export async function getMyReferralMembers(userId, level) {
+  if (!userId) throw new Error('Falta userId');
+  const lvl = Number(level);
+  if (![1, 2, 3].includes(lvl)) throw new Error('Level inválido');
+
+  const nowIso = new Date().toISOString().slice(0, 19);
+
+  const { data: lvl1, error: lvl1Err } = await supabaseAdmin
+    .from('usuarios')
+    .select('id, email, estado, fecha_registro')
+    .eq('referred_by', userId);
+  if (lvl1Err) throw new Error(lvl1Err.message);
+
+  const lvl1Ids = (lvl1 || []).map((u) => u.id).filter(Boolean);
+
+  const { data: lvl2, error: lvl2Err } = lvl1Ids.length
+    ? await supabaseAdmin
+        .from('usuarios')
+        .select('id, email, estado, fecha_registro')
+        .in('referred_by', lvl1Ids)
+    : { data: [], error: null };
+  if (lvl2Err) throw new Error(lvl2Err.message);
+
+  const lvl2Ids = (lvl2 || []).map((u) => u.id).filter(Boolean);
+
+  const { data: lvl3, error: lvl3Err } = lvl2Ids.length
+    ? await supabaseAdmin
+        .from('usuarios')
+        .select('id, email, estado, fecha_registro')
+        .in('referred_by', lvl2Ids)
+    : { data: [], error: null };
+  if (lvl3Err) throw new Error(lvl3Err.message);
+
+  const byLevel = {
+    1: lvl1 || [],
+    2: lvl2 || [],
+    3: lvl3 || [],
+  };
+
+  const members = byLevel[lvl] || [];
+  const memberIds = members.map((u) => u.id).filter(Boolean);
+
+  const { data: subsRaw, error: subsErr } = memberIds.length
+    ? await supabaseAdmin
+        .from('subscriptions')
+        .select('id, user_id, plan_id, created_at, expires_at, is_active, planes(precio)')
+        .in('user_id', memberIds)
+        .eq('is_active', true)
+        .gt('expires_at', nowIso)
+        .order('created_at', { ascending: false })
+    : { data: [], error: null };
+  if (subsErr) throw new Error(subsErr.message);
+
+  const plansByUser = new Map();
+  for (const s of subsRaw || []) {
+    const uid = s?.user_id;
+    if (!uid) continue;
+    const arr = plansByUser.get(uid) || [];
+    arr.push({
+      subscription_id: s?.id,
+      plan_id: s?.plan_id,
+      created_at: s?.created_at,
+      expires_at: s?.expires_at,
+      precio: Number(s?.planes?.precio ?? 0) || 0,
+    });
+    plansByUser.set(uid, arr);
+  }
+
+  return {
+    level: lvl,
+    members: (members || []).map((m) => ({
+      id: m?.id,
+      email: m?.email,
+      estado: m?.estado,
+      fecha_registro: m?.fecha_registro,
+      active_plans: plansByUser.get(m?.id) || [],
+    })),
   };
 }
 

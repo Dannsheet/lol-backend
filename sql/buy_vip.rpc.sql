@@ -20,6 +20,7 @@ declare
   v_user record;
   v_expires timestamp without time zone;
   v_precio numeric;
+  v_active_count integer;
 begin
   if p_user_id is null then
     raise exception 'Usuario no encontrado';
@@ -58,13 +59,24 @@ begin
     raise exception 'Usuario no encontrado';
   end if;
 
-  perform 1
+  select count(*)
+  into v_active_count
   from public.subscriptions s
   where s.user_id = p_user_id
     and s.is_active = true;
 
+  if coalesce(v_active_count, 0) >= 8 then
+    raise exception 'Límite de planes alcanzado';
+  end if;
+
+  perform 1
+  from public.subscriptions s
+  where s.user_id = p_user_id
+    and s.plan_id = p_plan_id
+    and s.is_active = true;
+
   if found then
-    raise exception 'Ya tienes una suscripción activa';
+    raise exception 'Ya tienes este plan activo';
   end if;
 
   if coalesce(v_user.saldo_interno, 0) < v_precio then
@@ -84,7 +96,7 @@ begin
     returning id into subscription_id;
   exception
     when unique_violation then
-      raise exception 'Ya tienes una suscripción activa';
+      raise exception 'Ya tienes este plan activo';
   end;
 
   insert into public.balance_movimientos (

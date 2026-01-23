@@ -8,7 +8,8 @@ import {
   getMyCommissionsController,
   linkReferralController,
   getMyReferralProfileController,
-  getMyReferralStatsController
+  getMyReferralStatsController,
+  getMyReferralMembersController
 } from "../controllers/referral.controller.js";
 
 const router = express.Router();
@@ -27,6 +28,9 @@ router.get("/me/profile", authMiddleware, getMyReferralProfileController);
 
 // Mis métricas de promoción (niveles 1-3)
 router.get("/me/stats", authMiddleware, getMyReferralStatsController);
+
+// Mi lista de miembros por nivel (1-3)
+router.get("/me/members", authMiddleware, getMyReferralMembersController);
 
 // Asociar un invite_code al usuario autenticado (1 vez)
 router.post("/link", authMiddleware, linkReferralController);

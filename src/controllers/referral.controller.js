@@ -4,7 +4,8 @@ import {
   getUserCommissions,
   linkReferral,
   getMyReferralProfile,
-  getMyReferralStats
+  getMyReferralStats,
+  getMyReferralMembers
 } from "../services/referrals.service.js";
 
 // Controlador para registrar usuario
@@ -105,6 +106,18 @@ export async function getMyReferralStatsController(req, res) {
     const authedId = req.user?.id;
     if (!authedId) return res.status(401).json({ error: 'No autenticado' });
     const result = await getMyReferralStats(authedId);
+    return res.json(result);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+}
+
+export async function getMyReferralMembersController(req, res) {
+  try {
+    const authedId = req.user?.id;
+    if (!authedId) return res.status(401).json({ error: 'No autenticado' });
+    const level = req.query?.level;
+    const result = await getMyReferralMembers(authedId, level);
     return res.json(result);
   } catch (err) {
     return res.status(400).json({ error: err.message });

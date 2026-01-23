@@ -1,55 +1,45 @@
 import express from "express";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 import { authMiddleware } from "../middlewares/auth.js";
 import { supabaseAdmin } from "../services/supabase.service.js";
 
 const router = express.Router();
 
-async function getActivePlanForUser(userId) {
+async function getActivePlansForUser(userId) {
   const nowIso = new Date().toISOString().slice(0, 19);
 
   const { data, error } = await supabaseAdmin
     .from("subscriptions")
-    .select("id, user_id, plan_id, is_active, expires_at, planes(*)")
+    .select("id, user_id, plan_id, is_active, expires_at, created_at, planes(*)")
     .eq("user_id", userId)
     .eq("is_active", true)
     .gt("expires_at", nowIso)
     .order("created_at", { ascending: false })
-    .limit(1);
+    .limit(10);
 
   if (error) throw error;
-  const row = Array.isArray(data) ? data[0] : null;
-  return row?.planes ? { subscription: row, plan: row.planes } : null;
+  return (Array.isArray(data) ? data : []).filter((row) => Boolean(row?.planes));
 }
 
 router.get("/videos/status", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const active = await getActivePlanForUser(userId);
-    if (!active) {
+    const active = await getActivePlansForUser(userId);
+    if (!active.length) {
       return res.json({
         puede_ver: false,
         videos_vistos_hoy: 0,
         limite_diario: 0,
         recompensa: 0,
+        planes: [],
       });
     }
 
-    const plan = active.plan;
-
     const limiteDiario = 1;
-    const recompensa = plan?.ganancia_diaria ?? plan?.recompensa ?? 0;
 
     const now = new Date();
     const dateKey = now.toISOString().slice(0, 10);
-    const seedHex = crypto
-      .createHash("sha256")
-      .update(`${userId}:${dateKey}`)
-      .digest("hex")
-      .slice(0, 12);
-    const dailySeed = Number.parseInt(seedHex, 16);
 
     const startOfDay = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
@@ -58,48 +48,78 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0)
     );
 
-    const [{ count, error: countError }, { data: lastView, error: lastViewError }] = await Promise.all([
-      supabaseAdmin
-        .from("videos_vistos")
-        .select("id", { count: "exact", head: true })
-        .eq("usuario_id", userId)
-        .gte("visto_en", startOfDay.toISOString())
-        .lt("visto_en", startOfNextDay.toISOString()),
-      supabaseAdmin
-        .from("videos_vistos")
-        .select("visto_en")
-        .eq("usuario_id", userId)
-        .order("visto_en", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-    ]);
+    const planes = [];
+    for (const row of active) {
+      const plan = row?.planes;
+      const planId = row?.plan_id;
 
-    if (countError) throw countError;
-    if (lastViewError) throw lastViewError;
+      const seedHex = crypto
+        .createHash("sha256")
+        .update(`${userId}:${dateKey}:${planId}`)
+        .digest("hex")
+        .slice(0, 12);
+      const dailySeed = Number.parseInt(seedHex, 16);
 
-    const vistosHoy = Number(count ?? 0);
+      const [{ count, error: countError }, { data: lastView, error: lastViewError }] = await Promise.all([
+        supabaseAdmin
+          .from("videos_vistos")
+          .select("id", { count: "exact", head: true })
+          .eq("usuario_id", userId)
+          .eq("plan_id", planId)
+          .gte("visto_en", startOfDay.toISOString())
+          .lt("visto_en", startOfNextDay.toISOString()),
+        supabaseAdmin
+          .from("videos_vistos")
+          .select("visto_en")
+          .eq("usuario_id", userId)
+          .eq("plan_id", planId)
+          .order("visto_en", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
 
-    let nextAvailableAt = null;
-    let puedeVer = vistosHoy < limiteDiario;
+      if (countError) throw countError;
+      if (lastViewError) throw lastViewError;
 
-    const lastSeenIso = lastView?.visto_en ? String(lastView.visto_en) : "";
-    if (lastSeenIso) {
-      const lastSeen = new Date(lastSeenIso);
-      const next = new Date(lastSeen.getTime() + 24 * 60 * 60 * 1000);
-      nextAvailableAt = next.toISOString();
-      if (Number.isFinite(next.getTime()) && now.getTime() < next.getTime()) {
-        puedeVer = false;
+      const vistosHoy = Number(count ?? 0);
+
+      let nextAvailableAt = null;
+      let puedeVer = vistosHoy < limiteDiario;
+
+      const lastSeenIso = lastView?.visto_en ? String(lastView.visto_en) : "";
+      if (lastSeenIso) {
+        const lastSeen = new Date(lastSeenIso);
+        const next = new Date(lastSeen.getTime() + 24 * 60 * 60 * 1000);
+        nextAvailableAt = next.toISOString();
+        if (Number.isFinite(next.getTime()) && now.getTime() < next.getTime()) {
+          puedeVer = false;
+        }
       }
+
+      planes.push({
+        plan_id: planId,
+        subscription_id: row?.id,
+        puede_ver: puedeVer,
+        videos_vistos_hoy: vistosHoy,
+        limite_diario: limiteDiario,
+        recompensa: plan?.ganancia_diaria ?? plan?.recompensa ?? 0,
+        date_key: dateKey,
+        daily_seed: Number.isFinite(dailySeed) ? dailySeed : null,
+        next_available_at: nextAvailableAt,
+      });
     }
 
+    const first = planes[0] || {};
+
     return res.json({
-      puede_ver: puedeVer,
-      videos_vistos_hoy: vistosHoy,
-      limite_diario: limiteDiario,
-      recompensa,
+      puede_ver: Boolean(first?.puede_ver),
+      videos_vistos_hoy: Number(first?.videos_vistos_hoy ?? 0),
+      limite_diario: Number(first?.limite_diario ?? 0),
+      recompensa: Number(first?.recompensa ?? 0),
       date_key: dateKey,
-      daily_seed: Number.isFinite(dailySeed) ? dailySeed : null,
-      next_available_at: nextAvailableAt,
+      daily_seed: first?.daily_seed ?? null,
+      next_available_at: first?.next_available_at ?? null,
+      planes,
     });
   } catch (error) {
     console.error("❌ Error en GET /videos/status:", error);
@@ -110,31 +130,18 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
 router.post("/videos/ver", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { video_id, calificacion } = req.body ?? {};
+    const { video_id, calificacion, plan_id } = req.body ?? {};
 
     if (!video_id) return res.status(400).json({ error: "Falta video_id" });
 
-    const active = await getActivePlanForUser(userId);
-    if (!active) {
+    const active = await getActivePlansForUser(userId);
+    if (!active.length) {
       return res.status(403).json({ error: "Usuario sin suscripción activa" });
     }
 
-    const { data: lastView, error: lastViewError } = await supabaseAdmin
-      .from("videos_vistos")
-      .select("visto_en")
-      .eq("usuario_id", userId)
-      .order("visto_en", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (lastViewError) throw lastViewError;
-    if (lastView?.visto_en) {
-      const now = new Date();
-      const lastSeen = new Date(String(lastView.visto_en));
-      const next = new Date(lastSeen.getTime() + 24 * 60 * 60 * 1000);
-      if (Number.isFinite(next.getTime()) && now.getTime() < next.getTime()) {
-        return res.status(422).json({ error: "Límite diario alcanzado" });
-      }
+    const chosenPlanId = plan_id != null ? Number(plan_id) : null;
+    if (chosenPlanId != null && !active.some((r) => Number(r?.plan_id) === chosenPlanId)) {
+      return res.status(403).json({ error: "Plan no activo" });
     }
 
     const token = req.user?.access_token;
@@ -167,6 +174,7 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
     const { error: rpcError } = await supabaseUser.rpc("registrar_video_visto", {
       p_video_id: video_id,
       p_calificacion: calificacion ?? null,
+      p_plan_id: chosenPlanId,
     });
 
     if (rpcError) {
@@ -205,8 +213,9 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
       throw rpcError;
     }
 
-    const monto = active?.plan?.ganancia_diaria ?? null;
-    return res.json({ ok: true, monto });
+    const selected = chosenPlanId != null ? active.find((r) => Number(r?.plan_id) === chosenPlanId) : active[0];
+    const monto = selected?.planes?.ganancia_diaria ?? null;
+    return res.json({ ok: true, monto, plan_id: selected?.plan_id ?? null });
   } catch (error) {
     console.error("❌ Error en POST /videos/ver:", error);
     return res.status(500).json({ error: "Error interno del servidor" });
