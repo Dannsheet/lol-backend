@@ -190,7 +190,7 @@ export async function createReferralLevels(newUserId, directInviterId) {
   }
 
   if (levelsToInsert.length > 0) {
-    await supabase.from("referral_levels").insert(levelsToInsert);
+    await supabaseAdmin.from("referral_levels").insert(levelsToInsert);
   }
 }
 
@@ -314,7 +314,7 @@ export async function getMyReferralStats(userId) {
   if (!userId) throw new Error('Falta userId');
 
   const now = new Date();
-  const nowIso = now.toISOString().slice(0, 19);
+  const nowSql = now.toISOString().slice(0, 19).replace('T', ' ');
 
   const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
   const startOfNextDay = new Date(
@@ -362,13 +362,18 @@ export async function getMyReferralStats(userId) {
         .select('user_id, plan_id, created_at, expires_at, is_active, planes(precio)')
         .in('user_id', uniqueTeamIds)
         .eq('is_active', true)
-        .gt('expires_at', nowIso)
         .order('created_at', { ascending: false })
     : { data: [], error: null };
   if (subsErr) throw new Error(subsErr.message);
 
+  const activeSubsFiltered = (activeSubsRaw || []).filter((r) => {
+    const expiresAt = r?.expires_at != null ? String(r.expires_at) : '';
+    if (!expiresAt) return true;
+    return expiresAt >= nowSql;
+  });
+
   const activeByUser = new Map();
-  for (const row of activeSubsRaw || []) {
+  for (const row of activeSubsFiltered) {
     const uid = row?.user_id;
     if (!uid) continue;
     const arr = activeByUser.get(uid) || [];
@@ -454,7 +459,7 @@ export async function getMyReferralMembers(userId, level) {
   const lvl = Number(level);
   if (![1, 2, 3].includes(lvl)) throw new Error('Level inválido');
 
-  const nowIso = new Date().toISOString().slice(0, 19);
+  const nowSql = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
   const { data: lvl1, error: lvl1Err } = await supabaseAdmin
     .from('usuarios')
@@ -497,13 +502,18 @@ export async function getMyReferralMembers(userId, level) {
         .select('id, user_id, plan_id, created_at, expires_at, is_active, planes(precio)')
         .in('user_id', memberIds)
         .eq('is_active', true)
-        .gt('expires_at', nowIso)
         .order('created_at', { ascending: false })
     : { data: [], error: null };
   if (subsErr) throw new Error(subsErr.message);
 
+  const subsFiltered = (subsRaw || []).filter((r) => {
+    const expiresAt = r?.expires_at != null ? String(r.expires_at) : '';
+    if (!expiresAt) return true;
+    return expiresAt >= nowSql;
+  });
+
   const plansByUser = new Map();
-  for (const s of subsRaw || []) {
+  for (const s of subsFiltered) {
     const uid = s?.user_id;
     if (!uid) continue;
     const arr = plansByUser.get(uid) || [];
@@ -580,7 +590,7 @@ export async function linkReferral({ userId, invite_code }) {
   }
 
   try {
-    const nowIso = new Date().toISOString();
+    const nowSql = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const { data: sub, error: subErr } = await supabaseAdmin
       .from('subscriptions')
       .select('id, user_id, plan_id, created_at, expires_at, is_active')
@@ -590,7 +600,10 @@ export async function linkReferral({ userId, invite_code }) {
       .maybeSingle();
 
     if (subErr) throw subErr;
-    if (sub?.id && (sub.is_active === true || (sub.expires_at && String(sub.expires_at) > nowIso))) {
+    const expiresAt = sub?.expires_at != null ? String(sub.expires_at) : '';
+    const isExpired = Boolean(expiresAt) && expiresAt < nowSql;
+
+    if (sub?.id && sub.is_active === true && !isExpired) {
       const { data: plan, error: planErr } = await supabaseAdmin
         .from('planes')
         .select('*')

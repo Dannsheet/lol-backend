@@ -7,11 +7,11 @@ const router = express.Router();
 router.get("/suscripcion/mi-plan", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
-    const nowIso = new Date().toISOString();
+    const nowIso = new Date().toISOString().slice(0, 19);
 
     const { data, error } = await supabaseAdmin
       .from("subscriptions")
-      .select("id, plan_id, expires_at, is_active, planes(*)")
+      .select("id, plan_id, expires_at, is_active")
       .eq("user_id", userId)
       .eq("is_active", true)
       .gt("expires_at", nowIso)
@@ -21,11 +21,21 @@ router.get("/suscripcion/mi-plan", authMiddleware, async (req, res) => {
     if (error) throw error;
 
     const row = Array.isArray(data) ? data[0] : null;
-    if (!row?.planes) {
+    const planId = row?.plan_id != null ? Number(row.plan_id) : null;
+    if (!row?.id || !Number.isFinite(planId)) {
       return res.json({ plan_activo: false });
     }
 
-    const plan = row.planes;
+    const { data: plan, error: planError } = await supabaseAdmin
+      .from("planes")
+      .select("*")
+      .eq("id", planId)
+      .maybeSingle();
+
+    if (planError) throw planError;
+    if (!plan) {
+      return res.json({ plan_activo: false });
+    }
 
     return res.json({
       plan_activo: true,

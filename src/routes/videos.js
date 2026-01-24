@@ -1,24 +1,47 @@
 import express from "express";
 import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
 import { authMiddleware } from "../middlewares/auth.js";
 import { supabaseAdmin } from "../services/supabase.service.js";
 
 const router = express.Router();
 
 async function getActivePlansForUser(userId) {
-  const nowIso = new Date().toISOString().slice(0, 19);
+  const nowSql = new Date().toISOString().slice(0, 19).replace("T", " ");
 
   const { data, error } = await supabaseAdmin
     .from("subscriptions")
-    .select("id, user_id, plan_id, is_active, expires_at, created_at, planes(*)")
+    .select("id, user_id, plan_id, is_active, expires_at, created_at")
     .eq("user_id", userId)
     .eq("is_active", true)
-    .gt("expires_at", nowIso)
     .order("created_at", { ascending: false })
     .limit(10);
 
   if (error) throw error;
-  return (Array.isArray(data) ? data : []).filter((row) => Boolean(row?.planes));
+
+  const rawRows = Array.isArray(data) ? data : [];
+  const rows = rawRows.filter((r) => {
+    const expiresAt = r?.expires_at != null ? String(r.expires_at) : "";
+    if (!expiresAt) return true;
+    return expiresAt >= nowSql;
+  });
+  const planIds = [...new Set(rows.map((r) => Number(r?.plan_id)).filter((id) => Number.isFinite(id)))];
+  if (!planIds.length) return [];
+
+  const { data: plans, error: plansError } = await supabaseAdmin
+    .from("planes")
+    .select("*")
+    .in("id", planIds);
+
+  if (plansError) throw plansError;
+
+  const byId = new Map((Array.isArray(plans) ? plans : []).map((p) => [Number(p?.id), p]));
+  return rows
+    .map((row) => ({
+      ...row,
+      planes: byId.get(Number(row?.plan_id)) ?? null,
+    }))
+    .filter((row) => Boolean(row?.planes));
 }
 
 router.get("/videos/status", authMiddleware, async (req, res) => {
@@ -36,8 +59,6 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
       });
     }
 
-    const limiteDiario = 1;
-
     const now = new Date();
     const dateKey = now.toISOString().slice(0, 10);
 
@@ -52,6 +73,8 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
     for (const row of active) {
       const plan = row?.planes;
       const planId = row?.plan_id;
+
+      const limiteDiario = Number(plan?.limite_tareas ?? 1);
 
       const seedHex = crypto
         .createHash("sha256")
@@ -130,9 +153,10 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
 router.post("/videos/ver", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { video_id, calificacion, plan_id } = req.body ?? {};
+    const { video_id, videoId, calificacion, plan_id } = req.body ?? {};
+    const resolvedVideoId = video_id ?? videoId;
 
-    if (!video_id) return res.status(400).json({ error: "Falta video_id" });
+    if (!resolvedVideoId) return res.status(400).json({ error: "Falta video_id" });
 
     const active = await getActivePlansForUser(userId);
     if (!active.length) {
@@ -171,11 +195,26 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
       }
     );
 
-    const { error: rpcError } = await supabaseUser.rpc("registrar_video_visto", {
-      p_video_id: video_id,
-      p_calificacion: calificacion ?? null,
-      p_plan_id: chosenPlanId,
-    });
+    let rpcError = null;
+
+    // Preferred signature (multi-plan): registrar_video_visto(p_video_id text, p_calificacion int, p_plan_id int default null)
+    {
+      const { error } = await supabaseUser.rpc("registrar_video_visto", {
+        p_video_id: resolvedVideoId,
+        p_calificacion: calificacion ?? null,
+        p_plan_id: chosenPlanId,
+      });
+      rpcError = error ?? null;
+    }
+
+    // Backward-compatible fallback: some DBs still have registrar_video_visto(p_calificacion int, p_video_id text)
+    if (rpcError && String(rpcError.code ?? "") === "PGRST202") {
+      const { error } = await supabaseUser.rpc("registrar_video_visto", {
+        p_calificacion: calificacion ?? null,
+        p_video_id: resolvedVideoId,
+      });
+      rpcError = error ?? null;
+    }
 
     if (rpcError) {
       const msg = String(rpcError.message ?? "");
@@ -197,6 +236,10 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
       if (lower.includes("límite diario") || lower.includes("limite diario")) {
         return res.status(422).json({ error: "Límite diario alcanzado" });
       }
+
+      if (lower.includes("24") && lower.includes("hora")) {
+        return res.status(422).json({ error: "Debes esperar 24 horas" });
+      }
       if (lower.includes("ya fue visto") || lower.includes("video repetido")) {
         return res.status(422).json({ error: "Video ya fue visto" });
       }
@@ -214,8 +257,24 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
     }
 
     const selected = chosenPlanId != null ? active.find((r) => Number(r?.plan_id) === chosenPlanId) : active[0];
-    const monto = selected?.planes?.ganancia_diaria ?? null;
-    return res.json({ ok: true, monto, plan_id: selected?.plan_id ?? null });
+    const montoRaw = selected?.planes?.ganancia_diaria ?? selected?.planes?.recompensa ?? 0;
+    const monto = Number(montoRaw ?? 0);
+
+    const { data: cuenta, error: cuentaError } = await supabaseAdmin
+      .from("cuentas")
+      .select("balance")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (cuentaError) throw cuentaError;
+    const balance = Number(cuenta?.balance ?? 0);
+
+    return res.json({
+      ok: true,
+      monto: Number.isFinite(monto) ? monto : 0,
+      plan_id: selected?.plan_id ?? null,
+      balance: Number.isFinite(balance) ? balance : 0,
+    });
   } catch (error) {
     console.error("❌ Error en POST /videos/ver:", error);
     return res.status(500).json({ error: "Error interno del servidor" });

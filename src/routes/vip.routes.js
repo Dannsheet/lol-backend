@@ -8,25 +8,39 @@ const router = express.Router();
 router.get("/current", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
-    const nowIso = new Date().toISOString();
+    const nowSql = new Date().toISOString().slice(0, 19).replace("T", " ");
 
     const { data, error } = await supabaseAdmin
       .from("subscriptions")
-      .select("id, plan_id, expires_at, is_active, planes(*)")
+      .select("id, plan_id, expires_at, is_active")
       .eq("user_id", userId)
       .eq("is_active", true)
-      .gt("expires_at", nowIso)
       .order("created_at", { ascending: false })
-      .limit(1);
+      .limit(10);
 
     if (error) throw error;
 
-    const row = Array.isArray(data) ? data[0] : null;
-    if (!row?.planes) {
+    const rows = Array.isArray(data) ? data : [];
+    const row = rows.find((r) => {
+      const expiresAt = r?.expires_at != null ? String(r.expires_at) : "";
+      if (!expiresAt) return true;
+      return expiresAt >= nowSql;
+    });
+    const planId = row?.plan_id != null ? Number(row.plan_id) : null;
+    if (!row?.id || !Number.isFinite(planId)) {
       return res.json({ is_active: false });
     }
 
-    const plan = row.planes;
+    const { data: plan, error: planError } = await supabaseAdmin
+      .from("planes")
+      .select("*")
+      .eq("id", planId)
+      .maybeSingle();
+
+    if (planError) throw planError;
+    if (!plan) {
+      return res.json({ is_active: false });
+    }
 
     return res.json({
       is_active: true,

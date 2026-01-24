@@ -6,6 +6,14 @@ import './workers/deposit.worker.js';
 
 const PORT = process.env.PORT || 3000
 
+try {
+  const raw = String(process.env.SUPABASE_URL || '')
+  const host = raw ? new URL(raw).host : ''
+  console.log('🔧 SUPABASE_URL host:', host || '(missing)')
+} catch {
+  console.log('🔧 SUPABASE_URL host: (invalid)')
+}
+
 const testSupabase = async () => {
   const { data, error } = await supabase
     .from('usuarios')

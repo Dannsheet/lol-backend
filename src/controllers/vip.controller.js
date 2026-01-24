@@ -19,6 +19,8 @@ export const buyVipController = async (req, res) => {
       if (
         msg.includes("Saldo insuficiente") ||
         msg.includes("Ya tienes una suscripción activa") ||
+        msg.includes("Ya tienes este plan activo") ||
+        msg.includes("Límite de planes alcanzado") ||
         msg.includes("Usuario no encontrado") ||
         msg.includes("Plan no existe")
       ) {
