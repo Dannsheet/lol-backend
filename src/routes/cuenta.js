@@ -100,6 +100,9 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
     const balance = cuenta?.balance ?? null;
 
     let totalGanado = null;
+    let ganadoReferidos = null;
+    let ganadoVideos = null;
+    let totalGanadoSource = 'fallback';
     try {
       const [{ data: refAgg, error: refErr }, { data: videoAgg, error: videoErr }] = await Promise.all([
         supabaseAdmin
@@ -119,12 +122,23 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
       if (refErr) throw refErr;
       if (videoErr) throw videoErr;
 
-      const refSum = Number(refAgg?.[0]?.sum ?? 0);
-      const videoSum = Number(videoAgg?.[0]?.sum ?? 0);
-      const computed = (Number.isFinite(refSum) ? refSum : 0) + (Number.isFinite(videoSum) ? videoSum : 0);
+      const refRow = Array.isArray(refAgg) ? refAgg[0] : refAgg;
+      const videoRow = Array.isArray(videoAgg) ? videoAgg[0] : videoAgg;
+
+      const refSum = Number(refRow?.sum ?? 0);
+      const videoSum = Number(videoRow?.sum ?? 0);
+
+      ganadoReferidos = Number.isFinite(refSum) ? refSum : 0;
+      ganadoVideos = Number.isFinite(videoSum) ? videoSum : 0;
+
+      const computed = ganadoReferidos + ganadoVideos;
       totalGanado = Number.isFinite(computed) ? computed : null;
+      totalGanadoSource = 'computed';
     } catch {
       totalGanado = cuenta?.total_ganado ?? null;
+      ganadoReferidos = null;
+      ganadoVideos = null;
+      totalGanadoSource = 'fallback';
     }
 
     const { data: movimientosVideo, error: movVideoError } = await supabaseAdmin
@@ -182,6 +196,9 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
     return res.json({
       balance,
       total_ganado: totalGanado,
+      ganado_referidos: ganadoReferidos,
+      ganado_videos: ganadoVideos,
+      total_ganado_source: totalGanadoSource,
       movimientos_recientes: movimientosRecientes,
     });
   } catch (error) {
