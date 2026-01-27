@@ -103,30 +103,33 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
     let ganadoReferidos = null;
     let ganadoVideos = null;
     let totalGanadoSource = 'fallback';
+    let totalGanadoError = null;
     try {
-      const [{ data: refAgg, error: refErr }, { data: videoAgg, error: videoErr }] = await Promise.all([
+      const [{ data: refRows, error: refErr }, { data: videoRows, error: videoErr }] = await Promise.all([
         supabaseAdmin
           .from('balance_movimientos')
-          .select('sum:monto.sum()')
+          .select('monto')
           .eq('usuario_id', userId)
           .ilike('tipo', 'comision_%')
-          .gt('monto', 0),
+          .gt('monto', 0)
+          .limit(10_000),
         supabaseAdmin
           .from('movimientos')
-          .select('sum:monto.sum()')
+          .select('monto')
           .eq('usuario_id', userId)
           .gt('monto', 0)
-          .ilike('descripcion', '%recompensa por ver video%'),
+          .ilike('descripcion', '%recompensa por ver video%')
+          .limit(10_000),
       ]);
 
       if (refErr) throw refErr;
       if (videoErr) throw videoErr;
 
-      const refRow = Array.isArray(refAgg) ? refAgg[0] : refAgg;
-      const videoRow = Array.isArray(videoAgg) ? videoAgg[0] : videoAgg;
+      const refList = Array.isArray(refRows) ? refRows : [];
+      const videoList = Array.isArray(videoRows) ? videoRows : [];
 
-      const refSum = Number(refRow?.sum ?? 0);
-      const videoSum = Number(videoRow?.sum ?? 0);
+      const refSum = refList.reduce((acc, r) => acc + (Number(r?.monto) || 0), 0);
+      const videoSum = videoList.reduce((acc, r) => acc + (Number(r?.monto) || 0), 0);
 
       ganadoReferidos = Number.isFinite(refSum) ? refSum : 0;
       ganadoVideos = Number.isFinite(videoSum) ? videoSum : 0;
@@ -134,11 +137,12 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
       const computed = ganadoReferidos + ganadoVideos;
       totalGanado = Number.isFinite(computed) ? computed : null;
       totalGanadoSource = 'computed';
-    } catch {
+    } catch (e) {
       totalGanado = cuenta?.total_ganado ?? null;
       ganadoReferidos = null;
       ganadoVideos = null;
       totalGanadoSource = 'fallback';
+      totalGanadoError = e?.message ? String(e.message) : String(e || 'unknown error');
     }
 
     const { data: movimientosVideo, error: movVideoError } = await supabaseAdmin
@@ -199,6 +203,7 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
       ganado_referidos: ganadoReferidos,
       ganado_videos: ganadoVideos,
       total_ganado_source: totalGanadoSource,
+      total_ganado_error: totalGanadoError,
       movimientos_recientes: movimientosRecientes,
     });
   } catch (error) {
