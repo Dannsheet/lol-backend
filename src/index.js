@@ -4,7 +4,7 @@ import { supabase } from './config/supabase.js'
 import './workers/withdrawal.worker.js';
 import './workers/deposit.worker.js';
 
-const PORT = process.env.PORT || 3000
+const PORT = Number.parseInt(process.env.PORT, 10) || 8080
 
 try {
   const raw = String(process.env.SUPABASE_URL || '')
