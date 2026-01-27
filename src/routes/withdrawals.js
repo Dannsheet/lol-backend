@@ -165,17 +165,20 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
     const total = Number(monto) + Number(fee);
 
     // 3. Verificar saldo
-    const { data: cuenta } = await supabaseAdmin
-      .from("cuentas")
-      .select("balance")
-      .eq("user_id", userId)
-      .single();
+    const { data: usuarioSaldo, error: saldoErr } = await supabaseAdmin
+      .from("usuarios")
+      .select("saldo_interno")
+      .eq("id", userId)
+      .maybeSingle();
 
-    if (!cuenta) return res.status(404).json({ error: "Cuenta no encontrada" });
-    if (cuenta.balance < total)
+    if (saldoErr) throw saldoErr;
+    if (!usuarioSaldo) return res.status(404).json({ error: "Usuario no encontrado" });
+    const disponible = Number(usuarioSaldo?.saldo_interno ?? 0);
+
+    if (!Number.isFinite(disponible) || disponible < total)
       return res.status(400).json({
         error: "Saldo insuficiente",
-        disponible: cuenta.balance,
+        disponible,
         requerido: total,
       });
 
@@ -252,11 +255,23 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Ya tienes un retiro pendiente" });
     }
 
-    // restar saldo mediante RPC
-    const { error: saldoError } = await supabaseAdmin.rpc("restar_balance", {
-      p_user_id: userId,
-      p_cantidad: total,
-    });
+    // restar saldo mediante RPC (fallback a increment_user_balance)
+    let saldoError = null;
+    {
+      const { error } = await supabaseAdmin.rpc("restar_balance", {
+        p_user_id: userId,
+        p_cantidad: total,
+      });
+      saldoError = error ?? null;
+    }
+
+    if (saldoError && String(saldoError.code ?? "") === "PGRST202") {
+      const { error } = await supabaseAdmin.rpc("increment_user_balance", {
+        userid: userId,
+        amountdelta: -Number(total),
+      });
+      saldoError = error ?? null;
+    }
 
     if (saldoError) {
       return res.status(400).json({ error: saldoError.message || "Saldo insuficiente o error RPC" });
@@ -282,12 +297,34 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
 
       // best-effort rollback (requiere RPC sumar_balance)
       try {
-        await supabaseAdmin.rpc("sumar_balance", { p_user_id: userId, p_cantidad: total });
+        let refundError = null;
+        {
+          const { error } = await supabaseAdmin.rpc("sumar_balance", { p_user_id: userId, p_cantidad: total });
+          refundError = error ?? null;
+        }
+        if (refundError && String(refundError.code ?? "") === "PGRST202") {
+          await supabaseAdmin.rpc("increment_user_balance", {
+            userid: userId,
+            amountdelta: Number(total),
+          });
+        }
       } catch {
         // ignore
       }
 
       return res.status(400).json({ error: retiroError.message });
+    }
+
+    // Registrar movimiento visible para el usuario
+    try {
+      await supabaseAdmin.from("movimientos").insert({
+        usuario_id: userId,
+        tipo: "retiro",
+        monto: -Number(total),
+        descripcion: "Retiro pendiente",
+      });
+    } catch {
+      // ignore
     }
 
     return res.json({

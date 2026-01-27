@@ -60,6 +60,14 @@ const markSent = async (retId, txHash) => {
     .eq("estado", "aprobado");
 };
 
+const ensureApproved = async (retId) => {
+  await supabaseAdmin
+    .from("retiros")
+    .update({ estado: "aprobado" })
+    .eq("id", retId)
+    .eq("estado", "pendiente");
+};
+
 const reconcileSentWithdrawals = async (provider, confirmationsRequired) => {
   const { data: rows, error } = await supabaseAdmin
     .from("retiros")
@@ -135,23 +143,51 @@ async function processWithdrawals() {
 
   await reconcileSentWithdrawals(provider, confirmationsRequired);
 
-  // 1️⃣ Llamar RPC tomar_retiro()
-  const { data, error: rpcError } = await supabaseAdmin.rpc("tomar_retiro");
-
-  if (rpcError) {
-    console.error("❌ Error RPC tomar_retiro:", rpcError.message);
-    running = false;
-    return;
+  // 1️⃣ Llamar RPC tomar_retiro() (si existe). Si no hay resultado, fallback a tabla.
+  let r = null;
+  try {
+    const { data, error: rpcError } = await supabaseAdmin.rpc("tomar_retiro");
+    if (rpcError) {
+      console.error("❌ Error RPC tomar_retiro:", rpcError.message);
+    } else if (Array.isArray(data) && data.length) {
+      r = data[0];
+    }
+  } catch (e) {
+    console.error("❌ Excepción RPC tomar_retiro:", e?.message || e);
   }
 
-  if (!data || data.length === 0) {
-    console.log("⏭️ No hay retiros pendientes");
-    running = false;
-    return;
+  if (!r) {
+    const { data: rows, error } = await supabaseAdmin
+      .from("retiros")
+      .select("id, usuario_id, monto, red, direccion, total, estado")
+      .in("estado", ["pendiente", "aprobado"])
+      .limit(1);
+
+    if (error) {
+      console.error("❌ Error consultando retiros:", error.message);
+      running = false;
+      return;
+    }
+
+    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+    if (!row) {
+      console.log("⏭️ No hay retiros pendientes");
+      running = false;
+      return;
+    }
+
+    await ensureApproved(row.id);
+    r = {
+      ret_id: row.id,
+      ret_usuario_id: row.usuario_id,
+      ret_monto: row.monto,
+      ret_red: row.red,
+      ret_direccion: row.direccion,
+      ret_total: row.total,
+    };
   }
 
-  // siempre viene un array
-  const r = data[0];
+  await ensureApproved(r.ret_id);
 
   console.log(`⚙️ Retiro tomado => ID: ${r.ret_id}`);
 
