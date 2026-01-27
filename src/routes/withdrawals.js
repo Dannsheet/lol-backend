@@ -52,9 +52,6 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
     if (!Number.isFinite(montoNum) || montoNum <= 0) {
       return res.status(400).json({ error: "Monto inválido" });
     }
-    if (montoNum < 10) {
-      return res.status(400).json({ error: "El retiro mínimo es 10 USDT" });
-    }
 
     // 1. Obtener usuario completo
     const { data: usuario, error: usuarioError } = await supabaseAdmin
@@ -162,7 +159,21 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
     const fee = fees[red] ?? null;
     if (!fee) return res.status(400).json({ error: "Red no soportada" });
 
-    const total = Number(monto) + Number(fee);
+    const total = Number(montoNum);
+    const neto = Number(montoNum) - Number(fee);
+
+    if (!Number.isFinite(neto) || neto <= 0) {
+      return res.status(400).json({ error: "Monto inválido" });
+    }
+
+    if (neto < 10) {
+      return res.status(400).json({
+        error: `El retiro mínimo es 10 USDT (después de comisión). Debes ingresar mínimo ${(10 + Number(fee)).toFixed(2)} USDT`,
+        minimo_neto: 10,
+        minimo_total: 10 + Number(fee),
+        fee,
+      });
+    }
 
     // 3. Verificar saldo
     const { data: usuarioSaldo, error: saldoErr } = await supabaseAdmin
@@ -196,7 +207,7 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
     return res.json({
       ok: true,
       message: "Retiro validado correctamente",
-      monto,
+      monto: neto,
       fee,
       total,
       red,
@@ -224,9 +235,6 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
     if (!Number.isFinite(montoNum) || montoNum <= 0) {
       return res.status(400).json({ error: "Monto inválido" });
     }
-    if (montoNum < 10) {
-      return res.status(400).json({ error: "El retiro mínimo es 10 USDT" });
-    }
 
     const addrErr = validateAddressByNetwork(red, direccion);
     if (addrErr) return res.status(400).json({ error: addrErr });
@@ -241,7 +249,21 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
     const fee = fees[red] ?? null;
     if (!fee) return res.status(400).json({ error: "Red no soportada" });
 
-    const total = Number(monto) + Number(fee);
+    const total = Number(montoNum);
+    const neto = Number(montoNum) - Number(fee);
+
+    if (!Number.isFinite(neto) || neto <= 0) {
+      return res.status(400).json({ error: "Monto inválido" });
+    }
+
+    if (neto < 10) {
+      return res.status(400).json({
+        error: `El retiro mínimo es 10 USDT (después de comisión). Debes ingresar mínimo ${(10 + Number(fee)).toFixed(2)} USDT`,
+        minimo_neto: 10,
+        minimo_total: 10 + Number(fee),
+        fee,
+      });
+    }
 
     // Evitar múltiples retiros activos incluso si llaman /create directo
     const { data: active } = await supabaseAdmin
@@ -282,7 +304,7 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       .from("retiros")
       .insert({
         usuario_id: userId,
-        monto,
+        monto: neto,
         red,
         direccion,
         fee,

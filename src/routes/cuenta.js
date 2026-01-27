@@ -98,7 +98,33 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
     if (cuentaError) throw cuentaError;
 
     const balance = cuenta?.balance ?? null;
-    const totalGanado = cuenta?.total_ganado ?? null;
+
+    let totalGanado = null;
+    try {
+      const [{ data: refAgg, error: refErr }, { data: videoAgg, error: videoErr }] = await Promise.all([
+        supabaseAdmin
+          .from('balance_movimientos')
+          .select('monto.sum()')
+          .eq('usuario_id', userId)
+          .gt('monto', 0),
+        supabaseAdmin
+          .from('movimientos')
+          .select('monto.sum()')
+          .eq('usuario_id', userId)
+          .gt('monto', 0)
+          .ilike('descripcion', '%recompensa por ver video%'),
+      ]);
+
+      if (refErr) throw refErr;
+      if (videoErr) throw videoErr;
+
+      const refSum = Number(refAgg?.[0]?.sum ?? 0);
+      const videoSum = Number(videoAgg?.[0]?.sum ?? 0);
+      const computed = (Number.isFinite(refSum) ? refSum : 0) + (Number.isFinite(videoSum) ? videoSum : 0);
+      totalGanado = Number.isFinite(computed) ? computed : null;
+    } catch {
+      totalGanado = cuenta?.total_ganado ?? null;
+    }
 
     const { data: movimientosVideo, error: movVideoError } = await supabaseAdmin
       .from("movimientos")

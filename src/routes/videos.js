@@ -61,13 +61,7 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
 
     const now = new Date();
     const dateKey = now.toISOString().slice(0, 10);
-
-    const startOfDay = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
-    );
-    const startOfNextDay = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0)
-    );
+    const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
     const planes = [];
     for (const row of active) {
@@ -83,39 +77,34 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
         .slice(0, 12);
       const dailySeed = Number.parseInt(seedHex, 16);
 
-      const [{ count, error: countError }, { data: lastView, error: lastViewError }] = await Promise.all([
-        supabaseAdmin
-          .from("videos_vistos")
-          .select("id", { count: "exact", head: true })
-          .eq("usuario_id", userId)
-          .eq("plan_id", planId)
-          .gte("visto_en", startOfDay.toISOString())
-          .lt("visto_en", startOfNextDay.toISOString()),
-        supabaseAdmin
-          .from("videos_vistos")
-          .select("visto_en")
-          .eq("usuario_id", userId)
-          .eq("plan_id", planId)
-          .order("visto_en", { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-      ]);
+      const { data: recentViews, error: viewsError } = await supabaseAdmin
+        .from("videos_vistos")
+        .select("visto_en")
+        .eq("usuario_id", userId)
+        .eq("plan_id", planId)
+        .gte("visto_en", windowStart.toISOString())
+        .order("visto_en", { ascending: false })
+        .limit(Math.max(1, limiteDiario));
 
-      if (countError) throw countError;
-      if (lastViewError) throw lastViewError;
+      if (viewsError) throw viewsError;
 
-      const vistosHoy = Number(count ?? 0);
+      const rows = Array.isArray(recentViews) ? recentViews : [];
+      const vistosHoy = rows.length;
 
       let nextAvailableAt = null;
       let puedeVer = vistosHoy < limiteDiario;
 
-      const lastSeenIso = lastView?.visto_en ? String(lastView.visto_en) : "";
-      if (lastSeenIso) {
-        const lastSeen = new Date(lastSeenIso);
-        const next = new Date(lastSeen.getTime() + 24 * 60 * 60 * 1000);
-        nextAvailableAt = next.toISOString();
-        if (Number.isFinite(next.getTime()) && now.getTime() < next.getTime()) {
-          puedeVer = false;
+      if (!puedeVer && rows.length) {
+        const earliestIso = rows[rows.length - 1]?.visto_en ? String(rows[rows.length - 1].visto_en) : "";
+        const earliest = earliestIso ? new Date(earliestIso) : null;
+        const next = earliest && Number.isFinite(earliest.getTime())
+          ? new Date(earliest.getTime() + 24 * 60 * 60 * 1000)
+          : null;
+        if (next && Number.isFinite(next.getTime())) {
+          nextAvailableAt = next.toISOString();
+          if (now.getTime() >= next.getTime()) {
+            puedeVer = true;
+          }
         }
       }
 
@@ -166,6 +155,48 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
     const chosenPlanId = plan_id != null ? Number(plan_id) : null;
     if (chosenPlanId != null && !active.some((r) => Number(r?.plan_id) === chosenPlanId)) {
       return res.status(403).json({ error: "Plan no activo" });
+    }
+
+    // Enforce 24h exactas (rolling window) antes del RPC.
+    {
+      const planRow = chosenPlanId != null
+        ? active.find((r) => Number(r?.plan_id) === chosenPlanId)
+        : active[0];
+      const plan = planRow?.planes;
+      const planId = Number(planRow?.plan_id);
+      const limiteDiario = Number(plan?.limite_tareas ?? 1);
+
+      if (Number.isFinite(planId) && Number.isFinite(limiteDiario) && limiteDiario > 0) {
+        const now = new Date();
+        const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+        const { data: recentViews, error: viewsError } = await supabaseAdmin
+          .from("videos_vistos")
+          .select("visto_en")
+          .eq("usuario_id", userId)
+          .eq("plan_id", planId)
+          .gte("visto_en", windowStart.toISOString())
+          .order("visto_en", { ascending: false })
+          .limit(Math.max(1, limiteDiario));
+
+        if (viewsError) throw viewsError;
+
+        const rows = Array.isArray(recentViews) ? recentViews : [];
+        if (rows.length >= limiteDiario && rows.length) {
+          const earliestIso = rows[rows.length - 1]?.visto_en ? String(rows[rows.length - 1].visto_en) : "";
+          const earliest = earliestIso ? new Date(earliestIso) : null;
+          const next = earliest && Number.isFinite(earliest.getTime())
+            ? new Date(earliest.getTime() + 24 * 60 * 60 * 1000)
+            : null;
+
+          if (!next || !Number.isFinite(next.getTime()) || now.getTime() < next.getTime()) {
+            return res.status(422).json({
+              error: "Debes esperar 24 horas para ver otro video",
+              next_available_at: next && Number.isFinite(next.getTime()) ? next.toISOString() : null,
+            });
+          }
+        }
+      }
     }
 
     const token = req.user?.access_token;
