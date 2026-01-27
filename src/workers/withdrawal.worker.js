@@ -18,12 +18,26 @@ const getEnvNumber = (key, fallback) => {
 
 const bestEffortRefund = async (userId, amount) => {
   try {
-    await supabaseAdmin.rpc("sumar_balance", {
+    const { error } = await supabaseAdmin.rpc("sumar_balance", {
       p_user_id: userId,
       p_cantidad: amount,
     });
+
+    if (error && String(error.code ?? "") === "PGRST202") {
+      await supabaseAdmin.rpc("increment_user_balance", {
+        userid: userId,
+        amountdelta: Number(amount),
+      });
+    }
   } catch {
-    // ignore
+    try {
+      await supabaseAdmin.rpc("increment_user_balance", {
+        userid: userId,
+        amountdelta: Number(amount),
+      });
+    } catch {
+      // ignore
+    }
   }
 };
 

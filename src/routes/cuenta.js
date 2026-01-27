@@ -104,12 +104,13 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
       const [{ data: refAgg, error: refErr }, { data: videoAgg, error: videoErr }] = await Promise.all([
         supabaseAdmin
           .from('balance_movimientos')
-          .select('monto.sum()')
+          .select('sum:monto.sum()')
           .eq('usuario_id', userId)
+          .ilike('tipo', 'comision_%')
           .gt('monto', 0),
         supabaseAdmin
           .from('movimientos')
-          .select('monto.sum()')
+          .select('sum:monto.sum()')
           .eq('usuario_id', userId)
           .gt('monto', 0)
           .ilike('descripcion', '%recompensa por ver video%'),
