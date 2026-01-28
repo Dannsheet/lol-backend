@@ -166,7 +166,11 @@ async function processWithdrawals() {
 
   if (hdBaseNode == null) {
     try {
-      hdBaseNode = HDNodeWallet.fromPhrase(mnemonic).derivePath(derivationPath);
+      const root = HDNodeWallet.fromPhrase(mnemonic, undefined, 'm');
+      const normalizedPath = String(derivationPath || '').trim().startsWith('m/')
+        ? String(derivationPath || '').trim()
+        : `m/${String(derivationPath || '').trim().replace(/^\/+/, '')}`;
+      hdBaseNode = root.derivePath(normalizedPath);
     } catch (e) {
       console.error('❌ Worker retiros: no se pudo derivar HD base node:', e?.message || e);
       running = false;
