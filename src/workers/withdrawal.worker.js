@@ -226,10 +226,6 @@ async function processWithdrawals() {
   if (!isAddress(to)) {
     console.error('❌ Dirección inválida:', to);
     await markFailed(r.ret_id);
-    const refundAmount = Number(r?.ret_total ?? 0);
-    if (Number.isFinite(refundAmount) && refundAmount > 0) {
-      await bestEffortRefund(r.ret_usuario_id, refundAmount);
-    }
     running = false;
     return;
   }
@@ -239,10 +235,6 @@ async function processWithdrawals() {
   if (!Number.isFinite(amountNum) || amountNum <= 0) {
     console.error('❌ Monto inválido:', amountStr);
     await markFailed(r.ret_id);
-    const refundAmount = Number(r?.ret_total ?? 0);
-    if (Number.isFinite(refundAmount) && refundAmount > 0) {
-      await bestEffortRefund(r.ret_usuario_id, refundAmount);
-    }
     running = false;
     return;
   }
@@ -273,18 +265,10 @@ async function processWithdrawals() {
     } else {
       console.error('❌ TX revertida:', tx.hash);
       await markFailed(r.ret_id);
-      const refundAmount = Number(r?.ret_total ?? 0);
-      if (Number.isFinite(refundAmount) && refundAmount > 0) {
-        await bestEffortRefund(r.ret_usuario_id, refundAmount);
-      }
     }
   } catch (e) {
     console.error('❌ Error enviando retiro:', e?.message || e);
     await markFailed(r.ret_id);
-    const refundAmount = Number(r?.ret_total ?? 0);
-    if (Number.isFinite(refundAmount) && refundAmount > 0) {
-      await bestEffortRefund(r.ret_usuario_id, refundAmount);
-    }
   } finally {
     running = false;
   }
