@@ -17,39 +17,29 @@ const getEnvNumber = (key, fallback) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-const bestEffortRefund = async (userId, amount) => {
+const refundWithdrawalToEarnings = async (retId) => {
   try {
-    const { error } = await supabaseAdmin.rpc("sumar_balance", {
-      p_user_id: userId,
-      p_cantidad: amount,
+    await supabaseAdmin.rpc("refund_withdrawal_to_earnings", {
+      p_retiro_id: retId,
     });
-
-    if (error && String(error.code ?? "") === "PGRST202") {
-      await supabaseAdmin.rpc("increment_user_balance", {
-        userid: userId,
-        amountdelta: Number(amount),
-      });
-    }
   } catch {
-    try {
-      await supabaseAdmin.rpc("increment_user_balance", {
-        userid: userId,
-        amountdelta: Number(amount),
-      });
-    } catch {
-      // ignore
-    }
+    // ignore
   }
 };
 
 const markFailed = async (retId) => {
-  await supabaseAdmin
+  const { data } = await supabaseAdmin
     .from("retiros")
     .update({
       estado: "fallido",
       procesado_en: new Date().toISOString(),
     })
-    .eq("id", retId);
+    .eq("id", retId)
+    .neq("estado", "fallido")
+    .neq("estado", "confirmado")
+    .select("id");
+
+  return Array.isArray(data) && data.length > 0;
 };
 
 const markConfirmed = async (retId) => {
@@ -108,10 +98,9 @@ const reconcileSentWithdrawals = async (provider, confirmationsRequired) => {
       if (receipt.status === 1) {
         await markConfirmed(r.id);
       } else {
-        await markFailed(r.id);
-        const refundAmount = Number(r?.total ?? 0);
-        if (Number.isFinite(refundAmount) && refundAmount > 0) {
-          await bestEffortRefund(r.usuario_id, refundAmount);
+        const transitioned = await markFailed(r.id);
+        if (transitioned) {
+          await refundWithdrawalToEarnings(r.id);
         }
       }
     } catch {
@@ -225,7 +214,10 @@ async function processWithdrawals() {
   const to = String(r?.ret_direccion || '').trim();
   if (!isAddress(to)) {
     console.error('❌ Dirección inválida:', to);
-    await markFailed(r.ret_id);
+    const transitioned = await markFailed(r.ret_id);
+    if (transitioned) {
+      await refundWithdrawalToEarnings(r.ret_id);
+    }
     running = false;
     return;
   }
@@ -234,7 +226,10 @@ async function processWithdrawals() {
   const amountNum = Number(amountStr);
   if (!Number.isFinite(amountNum) || amountNum <= 0) {
     console.error('❌ Monto inválido:', amountStr);
-    await markFailed(r.ret_id);
+    const transitioned = await markFailed(r.ret_id);
+    if (transitioned) {
+      await refundWithdrawalToEarnings(r.ret_id);
+    }
     running = false;
     return;
   }
@@ -264,11 +259,17 @@ async function processWithdrawals() {
       console.log(`✅ Retiro confirmado: ${r.ret_id}`);
     } else {
       console.error('❌ TX revertida:', tx.hash);
-      await markFailed(r.ret_id);
+      const transitioned = await markFailed(r.ret_id);
+      if (transitioned) {
+        await refundWithdrawalToEarnings(r.ret_id);
+      }
     }
   } catch (e) {
     console.error('❌ Error enviando retiro:', e?.message || e);
-    await markFailed(r.ret_id);
+    const transitioned = await markFailed(r.ret_id);
+    if (transitioned) {
+      await refundWithdrawalToEarnings(r.ret_id);
+    }
   } finally {
     running = false;
   }

@@ -773,7 +773,7 @@ const grantCommission = async (
     throw insertError;
   }
 
-  const { error: rpcError } = await supabaseAdmin.rpc("increment_user_balance", {
+  const { error: rpcError } = await supabaseAdmin.rpc("increment_user_earnings", {
     userid: referrerId,
     amountdelta: commissionAmount,
   });

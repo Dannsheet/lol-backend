@@ -58,6 +58,10 @@ begin
   insert into public.movimientos (usuario_id, tipo, monto, descripcion)
   values (v_user_id, 'ingreso', v_ganancia, 'Recompensa por ver video');
 
+  update public.usuarios
+  set saldo_ganancias = coalesce(saldo_ganancias, 0) + v_ganancia
+  where id = v_user_id;
+
   insert into public.cuentas (user_id, balance, total_ganado)
   values (v_user_id, v_ganancia, v_ganancia)
   on conflict (user_id) do update

@@ -34,54 +34,15 @@ const validateAddressByNetwork = (red, direccion) => {
   return '';
 };
 
-const getWithdrawableEarnings = async (userId) => {
-  const [{ data: refRows, error: refErr }, { data: videoRows, error: videoErr }, { data: wRows, error: wErr }] =
-    await Promise.all([
-      supabaseAdmin
-        .from('balance_movimientos')
-        .select('monto')
-        .eq('usuario_id', userId)
-        .ilike('tipo', 'comision_%')
-        .gt('monto', 0)
-        .limit(10_000),
-      supabaseAdmin
-        .from('movimientos')
-        .select('monto')
-        .eq('usuario_id', userId)
-        .gt('monto', 0)
-        .ilike('descripcion', '%recompensa por ver video%')
-        .limit(10_000),
-      supabaseAdmin
-        .from('retiros')
-        .select('total')
-        .eq('usuario_id', userId)
-        .in('estado', ['pendiente', 'aprobado', 'enviado', 'confirmado'])
-        .limit(10_000),
-    ]);
+const getEarningsBalance = async (userId) => {
+  const { data: row, error } = await supabaseAdmin
+    .from('usuarios')
+    .select('saldo_ganancias')
+    .eq('id', userId)
+    .single();
 
-  if (refErr) throw refErr;
-  if (videoErr) throw videoErr;
-  if (wErr) throw wErr;
-
-  const refList = Array.isArray(refRows) ? refRows : [];
-  const videoList = Array.isArray(videoRows) ? videoRows : [];
-  const wList = Array.isArray(wRows) ? wRows : [];
-
-  const refSum = refList.reduce((acc, r) => acc + (Number(r?.monto) || 0), 0);
-  const videoSum = videoList.reduce((acc, r) => acc + (Number(r?.monto) || 0), 0);
-  const committedSum = wList.reduce((acc, r) => acc + (Number(r?.total) || 0), 0);
-
-  const earned = (Number.isFinite(refSum) ? refSum : 0) + (Number.isFinite(videoSum) ? videoSum : 0);
-  const committed = Number.isFinite(committedSum) ? committedSum : 0;
-  const available = Math.max(0, earned - committed);
-
-  return {
-    earned_total: earned,
-    earned_referidos: Number.isFinite(refSum) ? refSum : 0,
-    earned_videos: Number.isFinite(videoSum) ? videoSum : 0,
-    committed_total: committed,
-    available,
-  };
+  if (error) throw error;
+  return Number(row?.saldo_ganancias ?? 0) || 0;
 };
 
 /**
@@ -226,14 +187,12 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
       });
     }
 
-    const earnings = await getWithdrawableEarnings(userId);
-    if (!Number.isFinite(earnings.available) || earnings.available < total) {
+    const disponible = await getEarningsBalance(userId);
+    if (!Number.isFinite(disponible) || disponible < total) {
       return res.status(400).json({
         error: "Saldo insuficiente",
-        disponible: earnings.available,
+        disponible,
         requerido: total,
-        ganado_total: earnings.earned_total,
-        retiros_comprometidos: earnings.committed_total,
       });
     }
 
@@ -255,7 +214,7 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
       fee,
       total,
       red: redNorm,
-      disponible: earnings.available,
+      disponible,
     });
   } catch (error) {
     console.error("❌ Error en /withdraw/validate:", error);
@@ -338,47 +297,42 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Ya tienes un retiro pendiente" });
     }
 
-    const earnings = await getWithdrawableEarnings(userId);
-    if (!Number.isFinite(earnings.available) || earnings.available < total) {
-      return res.status(400).json({
-        error: "Saldo insuficiente",
-        disponible: earnings.available,
-        requerido: total,
-        ganado_total: earnings.earned_total,
-        retiros_comprometidos: earnings.committed_total,
-      });
+    const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc(
+      'create_withdrawal_from_earnings',
+      {
+        p_user_id: userId,
+        p_total: total,
+        p_neto: neto,
+        p_fee: fee,
+        p_red: redNorm,
+        p_direccion: normalizedDireccion,
+      }
+    );
+
+    if (rpcError) {
+      const msg = String(rpcError.message ?? '');
+      if (msg.toLowerCase().includes('saldo insuficiente')) {
+        return res.status(400).json({ error: 'Saldo insuficiente' });
+      }
+      console.error('❌ create_withdrawal_from_earnings error:', rpcError);
+      return res.status(400).json({ error: rpcError.message });
     }
 
-    // crear registro en retiros
-    const { data: retiro, error: retiroError } = await supabaseAdmin
-      .from("retiros")
-      .insert({
-        usuario_id: userId,
-        monto: neto,
-        red: redNorm,
-        direccion: normalizedDireccion,
-        fee,
-        total,
-        estado: "pendiente",
-      })
-      .select()
+    const first = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+    const retiroId = first?.retiro_id;
+    if (!retiroId) {
+      console.error('❌ create_withdrawal_from_earnings no retorno retiro_id', rpcData);
+      return res.status(500).json({ error: 'No se pudo crear el retiro' });
+    }
+
+    const { data: retiro, error: fetchErr } = await supabaseAdmin
+      .from('retiros')
+      .select('*')
+      .eq('id', retiroId)
       .single();
 
-    if (retiroError) {
-      console.error("❌ SUPABASE INSERT ERROR:", retiroError);
-      return res.status(400).json({ error: retiroError.message });
-    }
-
-    // Registrar movimiento visible para el usuario
-    try {
-      await supabaseAdmin.from("movimientos").insert({
-        usuario_id: userId,
-        tipo: "retiro",
-        monto: -Number(total),
-        descripcion: "Retiro pendiente",
-      });
-    } catch {
-      // ignore
+    if (fetchErr) {
+      console.error('❌ Error consultando retiro creado:', fetchErr);
     }
 
     return res.json({
