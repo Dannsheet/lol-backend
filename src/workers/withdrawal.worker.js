@@ -1,9 +1,10 @@
 import { supabaseAdmin } from "../services/supabase.service.js";
-import { Contract, JsonRpcProvider, Wallet, parseUnits, isAddress } from "ethers";
+import { Contract, JsonRpcProvider, Wallet, parseUnits, isAddress, formatUnits } from "ethers";
 
 const ERC20_ABI = [
   "function transfer(address to, uint256 value) returns (bool)",
   "function decimals() view returns (uint8)",
+  "function balanceOf(address owner) view returns (uint256)",
 ];
 
 let running = false;
@@ -142,6 +143,15 @@ async function processWithdrawals() {
   const wallet = new Wallet(privateKey, provider);
   const token = new Contract(usdtContract, ERC20_ABI, wallet);
 
+  try {
+    const net = await provider.getNetwork();
+    console.log(
+      `🌐 Worker network: chainId=${String(net?.chainId ?? '')} name=${String(net?.name ?? '')} wallet=${wallet.address}`
+    );
+  } catch {
+    // ignore
+  }
+
   if (decimalsCache == null) {
     if (Number.isFinite(configuredDecimals) && configuredDecimals > 0) {
       decimalsCache = configuredDecimals;
@@ -239,6 +249,17 @@ async function processWithdrawals() {
 
   try {
     const units = parseUnits(amountStr, decimalsCache);
+    try {
+      const balanceRaw = await token.balanceOf(wallet.address);
+      const balanceFmt = formatUnits(balanceRaw, decimalsCache);
+      console.log(`💰 Worker USDT balance: ${balanceFmt} (decimals=${decimalsCache})`);
+      if (balanceRaw < units) {
+        throw new Error(`USDT insuficiente en wallet de retiros. Balance=${balanceFmt}, requerido=${amountStr}`);
+      }
+    } catch (balErr) {
+      console.error('❌ No se pudo validar balance USDT antes de enviar:', balErr?.message || balErr);
+      throw balErr;
+    }
     console.log(`🚀 Enviando ${amountStr} USDT (decimals=${decimalsCache}) a ${to}`);
 
     const tx = await token.transfer(to, units);
