@@ -22,7 +22,7 @@ const validateAddressByNetwork = (red, direccion) => {
 
   const evmNets = ['BEP20-USDT', 'ETH-USDT', 'POLYGON-USDT', 'BEP20', 'ETH', 'POLYGON'];
   if (evmNets.some((n) => net.includes(n))) {
-    if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) return 'Dirección inválida para la red seleccionada';
+    if (!/^0x[a-f0-9]{40}$/i.test(addr)) return 'Dirección inválida para la red seleccionada';
     return '';
   }
 
@@ -239,6 +239,16 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
     const addrErr = validateAddressByNetwork(red, direccion);
     if (addrErr) return res.status(400).json({ error: addrErr });
 
+    const normalizedDireccion = (() => {
+      const rawNet = String(red || '').trim().toUpperCase();
+      const rawAddr = String(direccion || '').trim();
+      const evmNets = ['BEP20-USDT', 'ETH-USDT', 'POLYGON-USDT', 'BEP20', 'ETH', 'POLYGON'];
+      if (evmNets.some((n) => rawNet.includes(n)) && /^0x[a-f0-9]{40}$/i.test(rawAddr)) {
+        if (rawAddr.startsWith('0X')) return `0x${rawAddr.slice(2)}`;
+      }
+      return rawAddr;
+    })();
+
     const fees = {
       "BEP20-USDT": 1,
       "TRC20-USDT": 1,
@@ -306,7 +316,7 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
         usuario_id: userId,
         monto: neto,
         red,
-        direccion,
+        direccion: normalizedDireccion,
         fee,
         total,
         estado: "pendiente",
