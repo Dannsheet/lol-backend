@@ -95,9 +95,17 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
       .eq("user_id", userId)
       .maybeSingle();
 
+    const { data: userRow, error: userErr } = await supabaseAdmin
+      .from("usuarios")
+      .select("saldo_ganancias")
+      .eq("id", userId)
+      .maybeSingle();
+
     if (cuentaError) throw cuentaError;
+    if (userErr) throw userErr;
 
     const balance = cuenta?.balance ?? null;
+    const saldoGanancias = userRow?.saldo_ganancias ?? null;
 
     let totalGanado = null;
     let ganadoReferidos = null;
@@ -199,6 +207,7 @@ router.get("/cuenta/info", authMiddleware, async (req, res) => {
 
     return res.json({
       balance,
+      saldo_ganancias: saldoGanancias,
       total_ganado: totalGanado,
       ganado_referidos: ganadoReferidos,
       ganado_videos: ganadoVideos,
