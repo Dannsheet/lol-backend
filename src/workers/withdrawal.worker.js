@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../services/supabase.service.js";
-import { Contract, JsonRpcProvider, Wallet, parseUnits, isAddress, formatUnits } from "ethers";
+import { Contract, JsonRpcProvider, HDNodeWallet, parseUnits, isAddress, formatUnits } from "ethers";
 
 const ERC20_ABI = [
   "function transfer(address to, uint256 value) returns (bool)",
@@ -9,6 +9,8 @@ const ERC20_ABI = [
 
 let running = false;
 let decimalsCache = null;
+
+let hdBaseNode = null;
 
 const getEnvNumber = (key, fallback) => {
   const raw = process.env[key];
@@ -47,7 +49,6 @@ const markConfirmed = async (retId) => {
     .from("retiros")
     .update({
       estado: "confirmado",
-      confirmado_en: new Date().toISOString(),
     })
     .eq("id", retId)
     .in("estado", ["enviado", "aprobado"]);
@@ -115,27 +116,36 @@ async function processWithdrawals() {
   console.log("🔁 Worker: buscando retiros pendientes...");
 
   const rpcUrl = String(process.env.BSC_RPC_URL || '').trim();
-  const privateKey = String(process.env.WITHDRAW_PRIVATE_KEY || '').trim();
   const usdtContract = String(process.env.USDT_CONTRACT_BSC || '').trim();
   const confirmationsRequired = getEnvNumber("CONFIRMATIONS_REQUIRED", 1);
   const configuredDecimals = getEnvNumber("USDT_DECIMALS", null);
 
-  if (!rpcUrl || !privateKey || !usdtContract) {
+  const mnemonic = String(process.env.BSC_MNEMONIC || process.env.MNEMONIC || '').trim();
+  const derivationPath = String(
+    process.env.BSC_DERIVATION_PATH || process.env.DERIVATION_PATH || "m/44'/60'/0'/0"
+  ).trim();
+
+  if (!rpcUrl || !usdtContract) {
     console.error(
-      "❌ Worker retiros: faltan variables .env (BSC_RPC_URL, WITHDRAW_PRIVATE_KEY, USDT_CONTRACT_BSC)"
+      "❌ Worker retiros: faltan variables .env (BSC_RPC_URL, USDT_CONTRACT_BSC)"
     );
     running = false;
     return;
   }
 
+  if (!mnemonic) {
+    console.error("❌ Worker retiros: falta BSC_MNEMONIC / MNEMONIC para derivar wallets");
+    running = false;
+    return;
+  }
+
   const provider = new JsonRpcProvider(rpcUrl);
-  const wallet = new Wallet(privateKey, provider);
-  const token = new Contract(usdtContract, ERC20_ABI, wallet);
+  const tokenRead = new Contract(usdtContract, ERC20_ABI, provider);
 
   try {
     const net = await provider.getNetwork();
     console.log(
-      `🌐 Worker network: chainId=${String(net?.chainId ?? '')} name=${String(net?.name ?? '')} wallet=${wallet.address}`
+      `🌐 Worker network: chainId=${String(net?.chainId ?? '')} name=${String(net?.name ?? '')}`
     );
   } catch {
     // ignore
@@ -146,11 +156,21 @@ async function processWithdrawals() {
       decimalsCache = configuredDecimals;
     } else {
       try {
-        const d = await token.decimals();
+        const d = await tokenRead.decimals();
         decimalsCache = Number(d);
       } catch {
         decimalsCache = 18;
       }
+    }
+  }
+
+  if (hdBaseNode == null) {
+    try {
+      hdBaseNode = HDNodeWallet.fromPhrase(mnemonic).derivePath(derivationPath);
+    } catch (e) {
+      console.error('❌ Worker retiros: no se pudo derivar HD base node:', e?.message || e);
+      running = false;
+      return;
     }
   }
 
@@ -222,6 +242,41 @@ async function processWithdrawals() {
     return;
   }
 
+  let senderWallet = null;
+  try {
+    const { data: walletRow, error: walletErr } = await supabaseAdmin
+      .from('user_wallets')
+      .select('deposit_address, unique_tag')
+      .eq('user_id', r.ret_usuario_id)
+      .maybeSingle();
+
+    if (walletErr) throw walletErr;
+    const idx = Number.parseInt(String(walletRow?.unique_tag ?? ''), 10);
+    if (!Number.isFinite(idx) || idx < 0) {
+      throw new Error('Índice de derivación inválido');
+    }
+
+    const derived = hdBaseNode.deriveChild(idx);
+    senderWallet = derived.connect(provider);
+
+    const expected = String(walletRow?.deposit_address ?? '').toLowerCase();
+    if (expected && expected !== String(senderWallet.address).toLowerCase()) {
+      console.error('❌ Derivación no coincide con deposit_address', {
+        user_id: r.ret_usuario_id,
+        expected,
+        derived: String(senderWallet.address).toLowerCase(),
+      });
+    }
+  } catch (e) {
+    console.error('❌ No se pudo derivar wallet del usuario para retiro:', e?.message || e);
+    const transitioned = await markFailed(r.ret_id);
+    if (transitioned) {
+      await refundWithdrawalToEarnings(r.ret_id);
+    }
+    running = false;
+    return;
+  }
+
   const amountStr = String(r?.ret_monto ?? '').trim();
   const amountNum = Number(amountStr);
   if (!Number.isFinite(amountNum) || amountNum <= 0) {
@@ -237,9 +292,19 @@ async function processWithdrawals() {
   try {
     const units = parseUnits(amountStr, decimalsCache);
     try {
-      const balanceRaw = await token.balanceOf(wallet.address);
+      const token = new Contract(usdtContract, ERC20_ABI, senderWallet);
+      const balanceRaw = await token.balanceOf(senderWallet.address);
       const balanceFmt = formatUnits(balanceRaw, decimalsCache);
-      console.log(`💰 Worker USDT balance: ${balanceFmt} (decimals=${decimalsCache})`);
+      console.log(
+        `💰 Worker sender=${senderWallet.address} USDT balance: ${balanceFmt} (decimals=${decimalsCache})`
+      );
+      try {
+        const bnbRaw = await provider.getBalance(senderWallet.address);
+        const bnbFmt = formatUnits(bnbRaw, 18);
+        console.log(`⛽️ Worker sender=${senderWallet.address} BNB balance: ${bnbFmt}`);
+      } catch {
+        // ignore
+      }
       if (balanceRaw < units) {
         throw new Error(`USDT insuficiente en wallet de retiros. Balance=${balanceFmt}, requerido=${amountStr}`);
       }
@@ -249,6 +314,7 @@ async function processWithdrawals() {
     }
     console.log(`🚀 Enviando ${amountStr} USDT (decimals=${decimalsCache}) a ${to}`);
 
+    const token = new Contract(usdtContract, ERC20_ABI, senderWallet);
     const tx = await token.transfer(to, units);
     await markSent(r.ret_id, tx.hash);
     console.log(`📤 Enviado: ${tx.hash}`);
