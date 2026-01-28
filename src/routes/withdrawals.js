@@ -294,20 +294,38 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Ya tienes un retiro pendiente" });
     }
 
-    // restar saldo mediante RPC (fallback a increment_user_balance)
+    // Verificar saldo (misma fuente que usa la app: usuarios.saldo_interno)
+    const { data: usuarioSaldo, error: saldoErr } = await supabaseAdmin
+      .from("usuarios")
+      .select("saldo_interno")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (saldoErr) throw saldoErr;
+    if (!usuarioSaldo) return res.status(404).json({ error: "Usuario no encontrado" });
+    const disponible = Number(usuarioSaldo?.saldo_interno ?? 0);
+    if (!Number.isFinite(disponible) || disponible < total) {
+      return res.status(400).json({
+        error: "Saldo insuficiente",
+        disponible,
+        requerido: total,
+      });
+    }
+
+    // restar saldo mediante RPC (preferimos increment_user_balance, que es el que usa depósitos/comisiones)
     let saldoError = null;
     {
-      const { error } = await supabaseAdmin.rpc("restar_balance", {
-        p_user_id: userId,
-        p_cantidad: total,
+      const { error } = await supabaseAdmin.rpc("increment_user_balance", {
+        userid: userId,
+        amountdelta: -Number(total),
       });
       saldoError = error ?? null;
     }
 
     if (saldoError && String(saldoError.code ?? "") === "PGRST202") {
-      const { error } = await supabaseAdmin.rpc("increment_user_balance", {
-        userid: userId,
-        amountdelta: -Number(total),
+      const { error } = await supabaseAdmin.rpc("restar_balance", {
+        p_user_id: userId,
+        p_cantidad: total,
       });
       saldoError = error ?? null;
     }
@@ -334,18 +352,19 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
     if (retiroError) {
       console.error("❌ SUPABASE INSERT ERROR:", retiroError);
 
-      // best-effort rollback (requiere RPC sumar_balance)
+      // best-effort rollback
       try {
         let refundError = null;
         {
-          const { error } = await supabaseAdmin.rpc("sumar_balance", { p_user_id: userId, p_cantidad: total });
-          refundError = error ?? null;
-        }
-        if (refundError && String(refundError.code ?? "") === "PGRST202") {
-          await supabaseAdmin.rpc("increment_user_balance", {
+          const { error } = await supabaseAdmin.rpc("increment_user_balance", {
             userid: userId,
             amountdelta: Number(total),
           });
+          refundError = error ?? null;
+        }
+
+        if (refundError && String(refundError.code ?? "") === "PGRST202") {
+          await supabaseAdmin.rpc("sumar_balance", { p_user_id: userId, p_cantidad: total });
         }
       } catch {
         // ignore
