@@ -17,7 +17,7 @@ const isAdminUser = (userId) => {
 
 const validateAddressByNetwork = (red, direccion) => {
   const net = String(red || '').trim().toUpperCase();
-  const addr = String(direccion || '').trim();
+  const addr = String(direccion || '').trim().replace(/\s+/g, '');
   if (!addr) return 'Dirección inválida';
 
   const evmNets = ['BEP20-USDT', 'ETH-USDT', 'POLYGON-USDT', 'BEP20', 'ETH', 'POLYGON'];
@@ -156,7 +156,8 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
       "POLYGON-USDT": 0.5,
     };
 
-    const fee = fees[red] ?? null;
+    const redNorm = String(red || '').trim();
+    const fee = fees[redNorm] ?? null;
     if (!fee) return res.status(400).json({ error: "Red no soportada" });
 
     const total = Number(montoNum);
@@ -210,7 +211,7 @@ router.post("/withdraw/validate", authMiddleware, async (req, res) => {
       monto: neto,
       fee,
       total,
-      red,
+      red: redNorm,
     });
   } catch (error) {
     console.error("❌ Error en /withdraw/validate:", error);
@@ -236,12 +237,18 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Monto inválido" });
     }
 
-    const addrErr = validateAddressByNetwork(red, direccion);
-    if (addrErr) return res.status(400).json({ error: addrErr });
+    const redNorm = String(red || '').trim();
+    const addrErr = validateAddressByNetwork(redNorm, direccion);
+    if (addrErr) {
+      const addrRaw = String(direccion || '').trim();
+      const masked = addrRaw.length > 14 ? `${addrRaw.slice(0, 8)}...${addrRaw.slice(-6)}` : addrRaw;
+      console.log('❌ withdraw/create invalid address', { red: redNorm, direccion: masked });
+      return res.status(400).json({ error: addrErr });
+    }
 
     const normalizedDireccion = (() => {
       const rawNet = String(red || '').trim().toUpperCase();
-      const rawAddr = String(direccion || '').trim();
+      const rawAddr = String(direccion || '').trim().replace(/\s+/g, '');
       const evmNets = ['BEP20-USDT', 'ETH-USDT', 'POLYGON-USDT', 'BEP20', 'ETH', 'POLYGON'];
       if (evmNets.some((n) => rawNet.includes(n)) && /^0x[a-f0-9]{40}$/i.test(rawAddr)) {
         if (rawAddr.startsWith('0X')) return `0x${rawAddr.slice(2)}`;
@@ -256,7 +263,7 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       "POLYGON-USDT": 0.5,
     };
 
-    const fee = fees[red] ?? null;
+    const fee = fees[redNorm] ?? null;
     if (!fee) return res.status(400).json({ error: "Red no soportada" });
 
     const total = Number(montoNum);
@@ -315,7 +322,7 @@ router.post("/withdraw/create", authMiddleware, async (req, res) => {
       .insert({
         usuario_id: userId,
         monto: neto,
-        red,
+        red: redNorm,
         direccion: normalizedDireccion,
         fee,
         total,
