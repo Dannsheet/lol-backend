@@ -17,6 +17,7 @@ declare
   v_videos_hoy integer;
   v_ganancia numeric;
   v_day date;
+  v_window_start timestamptz;
 begin
   v_user_id := auth.uid();
   if v_user_id is null then
@@ -24,6 +25,7 @@ begin
   end if;
 
   v_day := current_date;
+  v_window_start := now() - interval '24 hours';
 
   select p.*
   into v_plan
@@ -33,6 +35,14 @@ begin
     and s.is_active = true
     and s.expires_at > localtimestamp
     and (p_plan_id is null or s.plan_id = p_plan_id)
+    and not exists (
+      select 1
+      from public.videos_vistos vv
+      where vv.usuario_id = v_user_id
+        and vv.plan_id = p.id
+        and vv.visto_en >= v_window_start
+    )
+  order by s.created_at desc
   limit 1;
 
   if not found then
@@ -44,9 +54,9 @@ begin
   from public.videos_vistos
   where usuario_id = v_user_id
     and plan_id = v_plan.id
-    and day_key = v_day;
+    and visto_en >= v_window_start;
 
-  if v_videos_hoy >= coalesce(v_plan.limite_tareas, 1) then
+  if v_videos_hoy >= 1 then
     raise exception 'Límite diario alcanzado';
   end if;
 

@@ -12,7 +12,7 @@ router.get('/me', authMiddleware, async (req, res) => {
       await Promise.all([
         supabaseAdmin
           .from("usuarios")
-          .select("id, email, invite_code, referred_by, saldo_interno")
+          .select("id, email, invite_code, referred_by, saldo_interno, is_admin")
           .eq("id", userId)
           .maybeSingle(),
         supabaseAdmin

@@ -25,7 +25,18 @@ async function getActivePlansForUser(userId) {
     if (!expiresAt) return true;
     return expiresAt >= nowSql;
   });
-  const planIds = [...new Set(rows.map((r) => Number(r?.plan_id)).filter((id) => Number.isFinite(id)))];
+
+  // Regla: 1 video por PLAN cada 24h. Si un usuario compra el mismo plan 2 veces,
+  // sigue contando como 1 plan para videos. Por eso deduplicamos por plan_id.
+  const bestByPlan = new Map();
+  for (const r of rows) {
+    const pid = Number(r?.plan_id);
+    if (!Number.isFinite(pid)) continue;
+    if (!bestByPlan.has(pid)) bestByPlan.set(pid, r);
+  }
+
+  const uniqueRows = Array.from(bestByPlan.values());
+  const planIds = [...new Set(uniqueRows.map((r) => Number(r?.plan_id)).filter((id) => Number.isFinite(id)))];
   if (!planIds.length) return [];
 
   const { data: plans, error: plansError } = await supabaseAdmin
@@ -36,7 +47,7 @@ async function getActivePlansForUser(userId) {
   if (plansError) throw plansError;
 
   const byId = new Map((Array.isArray(plans) ? plans : []).map((p) => [Number(p?.id), p]));
-  return rows
+  return uniqueRows
     .map((row) => ({
       ...row,
       planes: byId.get(Number(row?.plan_id)) ?? null,
@@ -68,7 +79,7 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
       const plan = row?.planes;
       const planId = row?.plan_id;
 
-      const limiteDiario = Number(plan?.limite_tareas ?? 1);
+      const limiteDiario = 1;
 
       const seedHex = crypto
         .createHash("sha256")
@@ -110,7 +121,6 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
 
       planes.push({
         plan_id: planId,
-        subscription_id: row?.id,
         puede_ver: puedeVer,
         videos_vistos_hoy: vistosHoy,
         limite_diario: limiteDiario,
@@ -123,8 +133,10 @@ router.get("/videos/status", authMiddleware, async (req, res) => {
 
     const first = planes[0] || {};
 
+    const anyCan = planes.some((p) => Boolean(p?.puede_ver));
+
     return res.json({
-      puede_ver: Boolean(first?.puede_ver),
+      puede_ver: Boolean(anyCan),
       videos_vistos_hoy: Number(first?.videos_vistos_hoy ?? 0),
       limite_diario: Number(first?.limite_diario ?? 0),
       recompensa: Number(first?.recompensa ?? 0),
@@ -158,44 +170,67 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
     }
 
     // Enforce 24h exactas (rolling window) antes del RPC.
+    let planIdToUse = chosenPlanId;
     {
-      const planRow = chosenPlanId != null
-        ? active.find((r) => Number(r?.plan_id) === chosenPlanId)
-        : active[0];
-      const plan = planRow?.planes;
-      const planId = Number(planRow?.plan_id);
-      const limiteDiario = Number(plan?.limite_tareas ?? 1);
+      const now = new Date();
+      const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-      if (Number.isFinite(planId) && Number.isFinite(limiteDiario) && limiteDiario > 0) {
-        const now = new Date();
-        const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const candidates = chosenPlanId != null ? active.filter((r) => Number(r?.plan_id) === chosenPlanId) : active;
+
+      let canWatchAny = false;
+      let nextAvailableAt = null;
+      let firstEligiblePlanId = null;
+
+      for (const row of candidates) {
+        const pid = Number(row?.plan_id);
+        if (!Number.isFinite(pid)) continue;
 
         const { data: recentViews, error: viewsError } = await supabaseAdmin
           .from("videos_vistos")
           .select("visto_en")
           .eq("usuario_id", userId)
-          .eq("plan_id", planId)
+          .eq("plan_id", pid)
           .gte("visto_en", windowStart.toISOString())
           .order("visto_en", { ascending: false })
-          .limit(Math.max(1, limiteDiario));
+          .limit(1);
 
         if (viewsError) throw viewsError;
 
         const rows = Array.isArray(recentViews) ? recentViews : [];
-        if (rows.length >= limiteDiario && rows.length) {
+        if (rows.length < 1) {
+          canWatchAny = true;
+          if (firstEligiblePlanId == null) firstEligiblePlanId = pid;
+          break;
+        }
+
+        if (rows.length) {
           const earliestIso = rows[rows.length - 1]?.visto_en ? String(rows[rows.length - 1].visto_en) : "";
           const earliest = earliestIso ? new Date(earliestIso) : null;
           const next = earliest && Number.isFinite(earliest.getTime())
             ? new Date(earliest.getTime() + 24 * 60 * 60 * 1000)
             : null;
-
-          if (!next || !Number.isFinite(next.getTime()) || now.getTime() < next.getTime()) {
-            return res.status(422).json({
-              error: "Debes esperar 24 horas para ver otro video",
-              next_available_at: next && Number.isFinite(next.getTime()) ? next.toISOString() : null,
-            });
+          if (next && Number.isFinite(next.getTime())) {
+            if (nextAvailableAt == null || next.toISOString() < nextAvailableAt) {
+              nextAvailableAt = next.toISOString();
+            }
+            if (now.getTime() >= next.getTime()) {
+              canWatchAny = true;
+              break;
+            }
           }
         }
+      }
+
+      if (!canWatchAny) {
+        return res.status(422).json({
+          error: "Debes esperar 24 horas para ver otro video",
+          next_available_at: nextAvailableAt,
+        });
+      }
+
+      if (planIdToUse == null) planIdToUse = firstEligiblePlanId;
+      if (planIdToUse == null) {
+        return res.status(403).json({ error: "Plan no activo" });
       }
     }
 
@@ -227,24 +262,27 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
     );
 
     let rpcError = null;
+    let rpcData = null;
 
     // Preferred signature (multi-plan): registrar_video_visto(p_video_id text, p_calificacion int, p_plan_id int default null)
     {
-      const { error } = await supabaseUser.rpc("registrar_video_visto", {
+      const { data, error } = await supabaseUser.rpc("registrar_video_visto", {
         p_video_id: resolvedVideoId,
         p_calificacion: calificacion ?? null,
-        p_plan_id: chosenPlanId,
+        p_plan_id: planIdToUse,
       });
       rpcError = error ?? null;
+      rpcData = data ?? null;
     }
 
     // Backward-compatible fallback: some DBs still have registrar_video_visto(p_calificacion int, p_video_id text)
     if (rpcError && String(rpcError.code ?? "") === "PGRST202") {
-      const { error } = await supabaseUser.rpc("registrar_video_visto", {
+      const { data, error } = await supabaseUser.rpc("registrar_video_visto", {
         p_calificacion: calificacion ?? null,
         p_video_id: resolvedVideoId,
       });
       rpcError = error ?? null;
+      rpcData = data ?? null;
     }
 
     if (rpcError) {
@@ -287,7 +325,7 @@ router.post("/videos/ver", authMiddleware, async (req, res) => {
       throw rpcError;
     }
 
-    const selected = chosenPlanId != null ? active.find((r) => Number(r?.plan_id) === chosenPlanId) : active[0];
+    const selected = active.find((r) => Number(r?.plan_id) === Number(planIdToUse)) || active[0];
     const montoRaw = selected?.planes?.ganancia_diaria ?? selected?.planes?.recompensa ?? 0;
     const monto = Number(montoRaw ?? 0);
 
